@@ -165,15 +165,17 @@ class AnnotationManager:
 
 
 class App:
-    def __init__(self) -> None:
+    def __init__(self, data_dir: Path, annotations_file: Path) -> None:
         self.dash = Dash(__name__, suppress_callback_exceptions=True)
         self.manager = AnnotationManager(annotations_file, data_dir)
+        self.data_dir = data_dir
 
         self.annotation_tab = AnnotateImageTab(self)
         self.points_tab = GeographicPointsTab(self)
         self.management_tab = ManageAnnotationsTab(self)
 
         self.dash.layout = self.render_content()
+        self.register_callbacks()
 
     def render_content(self) -> html.Div:
         return html.Div(
@@ -197,11 +199,13 @@ class App:
             style={"padding": "20px"},
         )
 
-    @callback(
-        Output("tab-content", "children"),
-        Input("main-tabs", "value"),
-    )
-    def render_tab_content(tab: str) -> html.Div:
+    def register_callbacks(self) -> None:
+        self.dash.callback(
+            Output("tab-content", "children"),
+            Input("main-tabs", "value"),
+        )(self.render_tab_content)
+
+    def render_tab_content(self, tab: str) -> html.Div:
         """Render the content for the selected tab."""
         if tab == "tab-annotate":
             return self.annotation_tab.render_content()
@@ -217,8 +221,75 @@ class AnnotateImageTab:
     Tab 1: Annotate Images Callbacks
     """
 
+    callback_data = {
+        "update_image_dropdown": {
+            "inputs": [Input("domain-dropdown", "value")],
+            "output": [
+                Output("image-dropdown", "options"),
+                Output("image-dropdown", "value"),
+            ],
+            "prevent_initial_call": True,
+        },
+        "update_point_dropdown": {
+            "inputs": [
+                Input("points-store", "data"),
+                Input("main-tabs", "value"),
+            ],
+            "output": Output("point-select-dropdown", "options"),
+        },
+        "show_selected_point_info": {
+            "inputs": [Input("point-select-dropdown", "value")],
+            "output": Output("selected-point-info", "children"),
+        },
+        "update_image": {
+            "inputs": [
+                Input("domain-dropdown", "value"),
+                Input("image-dropdown", "value"),
+                Input("annotation-store", "data"),
+            ],
+            "output": Output("image-graph", "figure"),
+        },
+        
+        "handle_image_click": {
+            "inputs": [Input("image-graph", "relayoutData")],
+            "output": [
+                Output("pixel-x-input", "value"),
+                Output("pixel-y-input", "value"),
+                Output("click-info", "children"),
+            ],
+        },
+        "manage_annotations": {
+            "inputs": [
+                Input("add-button", "n_clicks"),
+                Input({"type": "delete-annotation-btn", "index": ALL}, "n_clicks"),
+                State("domain-dropdown", "value"),
+                State("image-dropdown", "value"),
+                State("pixel-x-input", "value"),
+                State("pixel-y-input", "value"),
+                State("point-select-dropdown", "value"),
+                State("annotation-store", "data"),
+            ],
+            "output": [
+                Output("annotation-store", "data"),
+                Output("point-select-dropdown", "value"),
+                Output("pixel-x-input", "value", allow_duplicate=True),
+                Output("pixel-y-input", "value", allow_duplicate=True),
+            ],
+            "prevent_initial_call": True,
+        },
+        "update_annotations_list": {
+            "inputs": [
+                Input("domain-dropdown", "value"),
+                Input("image-dropdown", "value"),
+                Input("annotation-store", "data"),
+            ],
+            "output": Output("annotations-list", "children"),
+        },
+    }
+
     def __init__(self, app: App) -> None:
         self.app = app
+        self._callbacks_registered = False
 
     def render_content(self) -> html.Div:
         """Create the Annotate Images tab content."""
@@ -228,7 +299,7 @@ class AnnotateImageTab:
             self.app.manager.get_images(initial_domain) if initial_domain else []
         )
 
-        return html.Div(
+        content = html.Div(
             [
                 html.Div(
                     [
@@ -349,62 +420,54 @@ class AnnotateImageTab:
             ]
         )
 
-    @callback(
-        Output("image-dropdown", "options"),
-        Output("image-dropdown", "value"),
-        Input("domain-dropdown", "value"),
-        prevent_initial_call=True,
-    )
-    def update_image_dropdown(domain: str | None) -> tuple[list[dict], str | None]:
+        self.register_callbacks()
+        return content
+
+    def register_callbacks(self) -> None:
+        if self._callbacks_registered:
+            return
+
+        for callback_fn_name, kwargs in self.callback_data.items():
+            callback_fn = getattr(self, callback_fn_name)
+            self.app.dash.callback(**kwargs)(callback_fn)
+
+        self._callbacks_registered = True
+
+    def update_image_dropdown(self, domain: str | None) -> tuple[list[dict], str | None]:
         """Update image dropdown when domain changes."""
         if domain is None:
             return [], None
-        images = manager.get_images(domain)
+        images = self.app.manager.get_images(domain)
         options = [{"label": img, "value": img} for img in images]
         value = images[0] if images else None
         return options, value
 
-    @callback(
-        Output("point-select-dropdown", "options"),
-        Input("points-store", "data"),
-        Input("main-tabs", "value"),
-    )
-    def update_point_dropdown(_store: dict, tab: str) -> list[dict]:
+    def update_point_dropdown(self, _store: dict, tab: str) -> list[dict]:
         """Update geographic point dropdown options."""
         if tab != "tab-annotate":
             return no_update
-        points = manager.get_geographic_points()
+        points = self.app.manager.get_geographic_points()
         return [
             {"label": f"{p['name']} ({key})", "value": key} for key, p in points.items()
         ]
 
-    @callback(
-        Output("selected-point-info", "children"),
-        Input("point-select-dropdown", "value"),
-    )
-    def show_selected_point_info(point_key: str | None) -> str:
+    def show_selected_point_info(self, point_key: str | None) -> str:
         """Show info about the selected geographic point."""
         if not point_key:
             return ""
-        points = manager.get_geographic_points()
+        points = self.app.manager.get_geographic_points()
         if point_key in points:
             p = points[point_key]
             return f"Lat: {p['latitude']}, Lon: {p['longitude']}"
         return ""
 
-    @callback(
-        Output("image-graph", "figure"),
-        Input("domain-dropdown", "value"),
-        Input("image-dropdown", "value"),
-        Input("annotation-store", "data"),
-    )
-    def update_image(domain: str | None, image: str | None, _store: dict) -> go.Figure:
+    def update_image(self, domain: str | None, image: str | None, _store: dict) -> go.Figure:
         """Update the image display with annotations."""
         fig = go.Figure()
         fig.update_layout(dragmode="drawrect")
 
         if domain and image:
-            image_path = data_dir / domain / image
+            image_path = self.app.data_dir / domain / image
             if image_path.exists():
                 img = Image.open(image_path)
                 fig.add_layout_image(
@@ -421,8 +484,8 @@ class AnnotateImageTab:
                     )
                 )
 
-                annotations = manager.get_annotations(domain, image)
-                points = manager.get_geographic_points()
+                annotations = self.app.manager.get_annotations(domain, image)
+                points = self.app.manager.get_geographic_points()
                 if annotations:
                     x_coords = [a["pixel_x"] for a in annotations]
                     y_coords = [a["pixel_y"] for a in annotations]
@@ -472,13 +535,8 @@ class AnnotateImageTab:
 
         return fig
 
-    @callback(
-        Output("pixel-x-input", "value"),
-        Output("pixel-y-input", "value"),
-        Output("click-info", "children"),
-        Input("image-graph", "relayoutData"),
-    )
     def handle_image_click(
+        self, 
         relayout_data: dict | None,
     ) -> tuple[int | None, int | None, str]:
         """Handle clicks on the image."""
@@ -498,22 +556,8 @@ class AnnotateImageTab:
         y = int(annotation_data["y0"])
         return x, y, f"Selected point: ({x}, {y})"
 
-    @callback(
-        Output("annotation-store", "data"),
-        Output("point-select-dropdown", "value"),
-        Output("pixel-x-input", "value", allow_duplicate=True),
-        Output("pixel-y-input", "value", allow_duplicate=True),
-        Input("add-button", "n_clicks"),
-        Input({"type": "delete-annotation-btn", "index": ALL}, "n_clicks"),
-        State("domain-dropdown", "value"),
-        State("image-dropdown", "value"),
-        State("pixel-x-input", "value"),
-        State("pixel-y-input", "value"),
-        State("point-select-dropdown", "value"),
-        State("annotation-store", "data"),
-        prevent_initial_call=True,
-    )
     def manage_annotations(
+        self,
         add_clicks: int,
         delete_clicks: list[int],
         domain: str | None,
@@ -537,13 +581,13 @@ class AnnotateImageTab:
                     "pixel_y": pixel_y,
                     "point": point_key,
                 }
-                manager.add_annotation(domain, image, annotation)
+                self.app.manager.add_annotation(domain, image, annotation)
                 return {**store, "update": store.get("update", 0) + 1}, None, None, None
 
         elif "delete-annotation-btn" in trigger_id:
             trigger_dict = json.loads(trigger_id.split(".")[0])
             index = trigger_dict["index"]
-            manager.remove_annotation(domain, image, index)
+            self.app.manager.remove_annotation(domain, image, index)
             return (
                 {**store, "update": store.get("update", 0) + 1},
                 point_key,
@@ -553,21 +597,15 @@ class AnnotateImageTab:
 
         return store, point_key, pixel_x, pixel_y
 
-    @callback(
-        Output("annotations-list", "children"),
-        Input("domain-dropdown", "value"),
-        Input("image-dropdown", "value"),
-        Input("annotation-store", "data"),
-    )
     def update_annotations_list(
-        domain: str | None, image: str | None, _store: dict
+        self, domain: str | None, image: str | None, _store: dict
     ) -> html.Div:
         """Update the list of annotations."""
         if not domain or not image:
             return html.Div("Select a domain and image to view annotations.")
 
-        annotations = manager.get_annotations(domain, image)
-        points = manager.get_geographic_points()
+        annotations = self.app.manager.get_annotations(domain, image)
+        points = self.app.manager.get_geographic_points()
 
         if not annotations:
             return html.Div(
@@ -887,7 +925,7 @@ class ManageAnnotationsTab:
     def __init__(self, app: App) -> None:
         self.app = app
 
-    def render_content(self) -> None:
+    def render_content(self) -> html.Div:
         """Create the Manage Annotations tab content."""
         domains = self.app.manager.get_domains()
         return html.Div(
@@ -1108,4 +1146,4 @@ def cli(data_dir: Path, annotations_file: Path, port: int, no_browser: bool) -> 
     click.echo(f"Annotations file: {annotations_file}")
     click.echo("Press Ctrl+C to stop")
 
-    app.run(debug=True, port=port, host="127.0.0.1")
+    app.dash.run(debug=True, port=port, host="127.0.0.1")
