@@ -543,7 +543,6 @@ class AnnotateImageTab:
         if relayout_data is None or "shapes" not in relayout_data:
             return None, None, "Click on the image to select a point"
 
-        print(relayout_data)
         annotation_data = relayout_data["shapes"][-1]
         if annotation_data["type"] != "rect":
             return (
@@ -672,10 +671,56 @@ class GeographicPointsTab:
     Tab 2: Geographic Points Callbacks
     """
 
+    callback_data = {
+        "handle_map_click": {
+            "output": [
+                Output("point-lat-input", "value"),
+                Output("point-lon-input", "value"),
+                Output("map-click-info", "children"),
+            ],
+            "inputs": [Input("leaflet-map", "clickData")],
+        },
+        "manage_geographic_points": {
+            "output": [
+                Output("points-store", "data"),
+                Output("point-key-input", "value"),
+                Output("point-name-input", "value"),
+                Output("point-lat-input", "value", allow_duplicate=True),
+                Output("point-lon-input", "value", allow_duplicate=True),
+            ],
+            "inputs": [
+                Input("add-point-btn", "n_clicks"),
+                Input({"type": "delete-point-btn", "index": ALL}, "n_clicks"),
+                State("point-key-input", "value"),
+                State("point-name-input", "value"),
+                State("point-lat-input", "value"),
+                State("point-lon-input", "value"),
+                State("points-store", "data"),
+            ],
+            "prevent_initial_call": True,
+        },
+        "update_point_markers": {
+            "output": Output("point-markers", "children"),
+            "inputs": [
+                Input("points-store", "data"),
+                Input("main-tabs", "value"),
+            ],
+        },
+        "update_points_list": {
+            "output": Output("points-list", "children"),
+            "inputs": [
+                Input("points-store", "data"),
+                Input("main-tabs", "value"),
+            ],
+        },
+    }
+
     def __init__(self, app: App) -> None:
         self.app = app
+        self._callbacks_registered = False
 
     def render_content(self) -> html.Div:
+        self.register_callbacks()
         return html.Div(
             [
                 html.Div(
@@ -759,13 +804,18 @@ class GeographicPointsTab:
             ]
         )
 
-    @callback(
-        Output("point-lat-input", "value"),
-        Output("point-lon-input", "value"),
-        Output("map-click-info", "children"),
-        Input("leaflet-map", "clickData"),
-    )
+    def register_callbacks(self) -> None:
+        if self._callbacks_registered:
+            return
+
+        for callback_fn_name, kwargs in self.callback_data.items():
+            callback_fn = getattr(self, callback_fn_name)
+            self.app.dash.callback(**kwargs)(callback_fn)
+
+        self._callbacks_registered = True
+
     def handle_map_click(
+        self,
         click_data: dict | None,
     ) -> tuple[float | None, float | None, str]:
         """Handle clicks on the leaflet map."""
@@ -776,22 +826,8 @@ class GeographicPointsTab:
         lon = click_data["latlng"]["lng"]
         return round(lat, 6), round(lon, 6), f"Selected: ({lat:.4f}, {lon:.4f})"
 
-    @callback(
-        Output("points-store", "data"),
-        Output("point-key-input", "value"),
-        Output("point-name-input", "value"),
-        Output("point-lat-input", "value", allow_duplicate=True),
-        Output("point-lon-input", "value", allow_duplicate=True),
-        Input("add-point-btn", "n_clicks"),
-        Input({"type": "delete-point-btn", "index": ALL}, "n_clicks"),
-        State("point-key-input", "value"),
-        State("point-name-input", "value"),
-        State("point-lat-input", "value"),
-        State("point-lon-input", "value"),
-        State("points-store", "data"),
-        prevent_initial_call=True,
-    )
     def manage_geographic_points(
+        self,
         add_clicks: int,
         delete_clicks: list[int],
         key: str | None,
@@ -809,7 +845,7 @@ class GeographicPointsTab:
 
         if "add-point-btn" in trigger_id:
             if key and name and lat is not None and lon is not None:
-                manager.add_geographic_point(
+                self.app.manager.add_geographic_point(
                     key.strip().lower(), name.strip(), lat, lon
                 )
                 return (
@@ -823,7 +859,7 @@ class GeographicPointsTab:
         elif "delete-point-btn" in trigger_id:
             trigger_dict = json.loads(trigger_id.split(".")[0])
             point_key = trigger_dict["index"]
-            manager.remove_geographic_point(point_key)
+            self.app.manager.remove_geographic_point(point_key)
             return (
                 {**store, "update": store.get("update", 0) + 1},
                 key or "",
@@ -834,16 +870,11 @@ class GeographicPointsTab:
 
         return store, key or "", name or "", lat, lon
 
-    @callback(
-        Output("point-markers", "children"),
-        Input("points-store", "data"),
-        Input("main-tabs", "value"),
-    )
-    def update_point_markers(_store: dict, tab: str) -> list:
+    def update_point_markers(self, _store: dict, tab: str) -> list:
         """Update markers on the leaflet map."""
         if tab != "tab-points":
             return no_update
-        points = manager.get_geographic_points()
+        points = self.app.manager.get_geographic_points()
         markers = []
         for key, p in points.items():
             markers.append(
@@ -859,16 +890,11 @@ class GeographicPointsTab:
             )
         return markers
 
-    @callback(
-        Output("points-list", "children"),
-        Input("points-store", "data"),
-        Input("main-tabs", "value"),
-    )
-    def update_points_list(_store: dict, tab: str) -> html.Div:
+    def update_points_list(self, _store: dict, tab: str) -> html.Div:
         """Update the list of geographic points."""
         if tab != "tab-points":
             return no_update
-        points = manager.get_geographic_points()
+        points =self.app.manager.get_geographic_points()
 
         if not points:
             return html.Div(
@@ -922,12 +948,56 @@ class ManageAnnotationsTab:
     Tab 3: Manage Annotations Callbacks
     """
 
+    callback_data = {
+        "update_filter_image_options": {
+            "output": Output("filter-image", "options"),
+            "inputs": [Input("filter-domain", "value")],
+        },
+        "update_all_annotations_list": {
+            "output": Output("all-annotations-list", "children"),
+            "inputs": [
+                Input("filter-domain", "value"),
+                Input("filter-image", "value"),
+                Input("annotation-store", "data"),
+                Input("main-tabs", "value"),
+            ],
+        },
+        "delete_annotation_from_manage_tab": {
+            "output": Output("annotation-store", "data", allow_duplicate=True),
+            "inputs": [
+                Input(
+                    {
+                        "type": "delete-all-annotation-btn",
+                        "domain": ALL,
+                        "image": ALL,
+                        "index": ALL,
+                    },
+                    "n_clicks",
+                ),
+                State("annotation-store", "data"),
+            ],
+            "prevent_initial_call": True,
+        },
+    }
+
     def __init__(self, app: App) -> None:
         self.app = app
+        self._callbacks_registered = False
+
+    def register_callbacks(self) -> None:
+        if self._callbacks_registered:
+            return
+
+        for callback_fn_name, kwargs in self.callback_data.items():
+            callback_fn = getattr(self, callback_fn_name)
+            self.app.dash.callback(**kwargs)(callback_fn)
+
+        self._callbacks_registered = True
 
     def render_content(self) -> html.Div:
         """Create the Manage Annotations tab content."""
         domains = self.app.manager.get_domains()
+        self.register_callbacks()
         return html.Div(
             [
                 html.H3("Filter Annotations"),
@@ -970,26 +1040,16 @@ class ManageAnnotationsTab:
             ]
         )
 
-    @callback(
-        Output("filter-image", "options"),
-        Input("filter-domain", "value"),
-    )
-    def update_filter_image_options(domain: str | None) -> list[dict]:
+    def update_filter_image_options(self, domain: str | None) -> list[dict]:
         """Update image filter options based on selected domain."""
         options = [{"label": "All", "value": ""}]
         if domain:
-            images = manager.get_images(domain)
+            images = self.app.manager.get_images(domain)
             options.extend([{"label": img, "value": img} for img in images])
         return options
 
-    @callback(
-        Output("all-annotations-list", "children"),
-        Input("filter-domain", "value"),
-        Input("filter-image", "value"),
-        Input("annotation-store", "data"),
-        Input("main-tabs", "value"),
-    )
     def update_all_annotations_list(
+        self,
         filter_domain: str | None,
         filter_image: str | None,
         _store: dict,
@@ -999,8 +1059,8 @@ class ManageAnnotationsTab:
         if tab != "tab-manage":
             return no_update
 
-        all_annotations = manager.get_all_annotations()
-        points = manager.get_geographic_points()
+        all_annotations = self.app.manager.get_all_annotations()
+        points = self.app.manager.get_geographic_points()
 
         if filter_domain:
             all_annotations = [
@@ -1071,21 +1131,8 @@ class ManageAnnotationsTab:
 
         return html.Div(annotation_items)
 
-    @callback(
-        Output("annotation-store", "data", allow_duplicate=True),
-        Input(
-            {
-                "type": "delete-all-annotation-btn",
-                "domain": ALL,
-                "image": ALL,
-                "index": ALL,
-            },
-            "n_clicks",
-        ),
-        State("annotation-store", "data"),
-        prevent_initial_call=True,
-    )
     def delete_annotation_from_manage_tab(
+        self,
         delete_clicks: list[int],
         store: dict,
     ) -> dict:
@@ -1103,7 +1150,7 @@ class ManageAnnotationsTab:
         image = trigger_dict["image"]
         index = trigger_dict["index"]
 
-        manager.remove_annotation(domain, image, index)
+        self.app.manager.remove_annotation(domain, image, index)
         return {**store, "update": store.get("update", 0) + 1}
 
 
